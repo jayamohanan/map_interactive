@@ -1,102 +1,247 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Kerala Local Body Interactive Map</title>
+<title>Kerala Local Body Locator - Live</title>
+
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <style>
-  body, html { margin:0; padding:0; height:100%; }
-  #map { width:100%; height:100%; }
+  body, html { margin: 0; padding: 0; height: 100%; }
+  #map { width: 100%; height: 100%; }
 
-  #localBodyName {
+  #version {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 1000;
+    background: rgba(255,255,255,0.8);
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: bold;
+  }
+
+  #updateCounter {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1000;
+    background: rgba(255,255,255,0.8);
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 16px;
+    font-weight: bold;
+  }
+
+  #welcome {
+    position: absolute;
+    bottom: 60px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1000;
+    background: rgba(255,255,255,0.9);
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-weight: bold;
+    font-size: 20px;
+    display: none;
+  }
+
+  #result {
     position: absolute;
     bottom: 20px;
     left: 50%;
     transform: translateX(-50%);
+    z-index: 1000;
     background: rgba(255,255,255,0.9);
     padding: 10px 16px;
     border-radius: 8px;
-    font-size: 20px;
     font-weight: bold;
-    z-index: 1000;
+    font-size: 22px;
   }
 </style>
 </head>
 <body>
 
+<div id="version">v1.1</div> <!-- this is incremented by one everytime this html is edited -->
+<div id="updateCounter">Update 0</div>
+<div id="welcome"></div>
+<div id="result">Detecting your location...</div>
 <div id="map"></div>
-<div id="localBodyName">Click on a location to see local body</div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 
 <script>
-let map = L.map('map').setView([10.5, 76.5], 7);
+let map, geoFeatures = [], geoLayer = null, userMarker = null;
+let currentLocalBody = null;
+let lastLat = null;
+let lastLng = null;
+const THRESHOLD_METERS = 5;
 
-// Add OSM tiles
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '&copy; OpenStreetMap contributors'
-}).addTo(map);
+let updateCounter = 0;
+const MAX_COUNTER = 9;
 
-let geoFeatures = [];
-let geoLayer = null;
-let highlightedLayer = null;
+// Neighbor map placeholder
+let neighborsMap = {};
 
-// Load GeoJSON
-fetch('local__bodies.geojson')
-  .then(res => res.json())
-  .then(data => {
-    geoFeatures = data.features;
+function getLocalBodyName(props){
+  if(!props) return 'Unknown';
+  const keys = ['name','NAME','Name','LGB_NAME','LB_NAME','local_body','LOCAL_BODY'];
+  for(const k of keys){
+    if(k in props && props[k]) return props[k];
+  }
+  return 'Unknown';
+}
 
-    // Draw polygons
-    geoLayer = L.geoJSON(geoFeatures, {
-      style: {
-        color:'#2a63b8', 
-        weight:1, 
-        fillColor:'#8fb8ff', 
-        fillOpacity:0.3
+function distanceInMeters(lat1, lng1, lat2, lng2){
+  const R = 6371000;
+  const dLat = (lat2-lat1)*Math.PI/180;
+  const dLng = (lng2-lng1)*Math.PI/180;
+  const a = Math.sin(dLat/2)**2 +
+            Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*
+            Math.sin(dLng/2)**2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+function findCurrentLocalBody(lat, lng){
+  const point = [lng, lat];
+
+  if(currentLocalBody && turf.booleanPointInPolygon(point, currentLocalBody)){
+    return currentLocalBody;
+  }
+
+  if(currentLocalBody){
+    const neighborIds = neighborsMap[currentLocalBody.properties.ID] || [];
+    for(const id of neighborIds){
+      const poly = geoFeatures.find(f => f.properties.ID === id);
+      if(poly && turf.booleanPointInPolygon(point, poly)){
+        return poly;
       }
-    }).addTo(map);
-  })
-  .catch(err => {
-    console.error(err);
-    document.getElementById('localBodyName').textContent = "Error loading GeoJSON";
-  });
-
-// Handle map click
-map.on('click', function(e){
-  const point = [e.latlng.lng, e.latlng.lat]; // GeoJSON is [lng, lat]
-  let found = null;
+    }
+  }
 
   for(const feat of geoFeatures){
     if(turf.booleanPointInPolygon(point, feat)){
-      found = feat;
-      break;
+      return feat;
     }
   }
 
-  if(found){
-    const keys = ['name','NAME','Name','LGB_NAME','LB_NAME','local_body','LOCAL_BODY'];
-    let localBodyName = 'Unknown';
-    for(const k of keys){
-      if(k in found.properties && found.properties[k]){
-        localBodyName = found.properties[k];
-        break;
-      }
-    }
+  return null;
+}
 
-    document.getElementById('localBodyName').textContent = localBodyName;
+function moveMarkerSmoothly(marker, newLatLng){
+  marker.setLatLng(newLatLng);
+}
 
-    // Highlight the selected polygon
-    if(highlightedLayer) geoLayer.resetStyle(highlightedLayer);
-    highlightedLayer = geoLayer.getLayers().find(l => l.feature === found);
-    if(highlightedLayer) highlightedLayer.setStyle({fillColor:'yellow', fillOpacity:0.5});
+function incrementUpdateCounter(){
+  updateCounter++;
+  if(updateCounter > MAX_COUNTER) updateCounter = 1;
+  document.getElementById('updateCounter').textContent = "Update " + updateCounter;
+}
+
+function processLocation(lat, lng){
+  incrementUpdateCounter();
+  const latlng = [lat, lng];
+
+  if(!userMarker){
+    userMarker = L.circleMarker(latlng, {
+      radius:7, fillColor:'#007bff', color:'#fff', weight:1.2, fillOpacity:1
+    }).addTo(map);
   } else {
-    document.getElementById('localBodyName').textContent = "Not inside any local body";
+    moveMarkerSmoothly(userMarker, latlng);
+    if(!map.getBounds().contains(latlng)){
+      map.panTo(latlng, {animate:true});
+    }
   }
-});
+
+  let found = findCurrentLocalBody(lat, lng);
+  if(found){
+    const localBodyName = getLocalBodyName(found.properties);
+
+    if(currentLocalBody !== found){
+      currentLocalBody = found;
+      document.getElementById('welcome').style.display = 'block';
+      document.getElementById('welcome').textContent = "Welcome to";
+      document.getElementById('result').textContent = localBodyName;
+
+      setTimeout(()=>{ document.getElementById('welcome').style.display='none'; }, 3000);
+
+      const layer = geoLayer.getLayers().find(l => l.feature === found);
+      if(layer){
+        map.fitBounds(layer.getBounds(), {padding:[50,50]});
+      }
+    } else {
+      document.getElementById('result').textContent = localBodyName;
+    }
+  } else {
+    document.getElementById('result').textContent = "Not inside any local body";
+  }
+}
+
+// Initialize map
+map = L.map('map').setView([10.5, 76.5], 7);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution:'&copy; OSM'}).addTo(map);
+
+// Load GeoJSON
+fetch('local_bodies.geojson')
+  .then(res => res.json())
+  .then(data => {
+    geoFeatures = data.features || [];
+    if(geoFeatures.length === 0){
+      document.getElementById('result').textContent = "GeoJSON has no features.";
+      return;
+    }
+
+    geoLayer = L.geoJSON(geoFeatures, {
+      style: {color:'#2a63b8', weight:1, fillColor:'#8fb8ff', fillOpacity:0.3}
+    }).addTo(map);
+
+    if(navigator.geolocation){
+      navigator.geolocation.watchPosition(pos => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+
+        if(lastLat===null){
+          lastLat = lat;
+          lastLng = lng;
+          console.log("Initial location detected — calculating local body.");
+          processLocation(lat, lng);
+        } else if(distanceInMeters(lastLat,lastLng,lat,lng)>=THRESHOLD_METERS){
+          lastLat = lat;
+          lastLng = lng;
+          console.log("Device moved more than 5 meters — recalculating local body.");
+          processLocation(lat, lng);
+        } else {
+          processLocation(lastLat,lastLng);
+        }
+      }, err=>{ console.warn("Unable to get location: " + err.message); }, 
+      {enableHighAccuracy:true, maximumAge:0, timeout:5000});
+    } else {
+      alert("Geolocation not supported");
+    }
+
+    // Click to detect local body
+    map.on('click', e=>{
+      const lat = e.latlng.lat;
+      const lng = e.latlng.lng;
+      let clickedBody = findCurrentLocalBody(lat,lng);
+      if(clickedBody){
+        const name = getLocalBodyName(clickedBody.properties);
+        alert("Clicked in local body: " + name);
+      } else {
+        alert("Clicked location not inside any local body.");
+      }
+    });
+
+  })
+  .catch(err=>{
+    console.error(err);
+    document.getElementById('result').textContent = "Error loading GeoJSON.";
+  });
 </script>
 </body>
 </html>
